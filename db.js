@@ -132,7 +132,8 @@ async function upsertUser(u) {
      VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8)
      ON CONFLICT (github_id) DO UPDATE SET
        username=EXCLUDED.username, email=EXCLUDED.email,
-       avatar_url=EXCLUDED.avatar_url, last_login_at=EXCLUDED.last_login_at
+       avatar_url=EXCLUDED.avatar_url, last_login_at=EXCLUDED.last_login_at,
+       is_active=true
      RETURNING *`,
     [u.id,u.github_id,u.username,u.email,u.avatar_url,u.role||'analyst',u.last_login_at,u.created_at]
   );
