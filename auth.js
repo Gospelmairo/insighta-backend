@@ -73,9 +73,8 @@ router.get('/github/callback', async (req, res) => {
   const tokens = await exchangeAndIssue(code, state, null);
   if (!tokens) return res.status(502).json({ status: 'error', message: 'GitHub exchange failed' });
 
-  res.cookie('access_token', tokens.access_token, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3 * 60 * 1000 });
-  res.cookie('refresh_token', tokens.refresh_token, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 5 * 60 * 1000 });
-  res.redirect(`${FRONTEND_URL}/dashboard`);
+  const params = new URLSearchParams({ at: tokens.access_token, rt: tokens.refresh_token });
+  res.redirect(`${FRONTEND_URL}/auth/callback?${params}`);
 });
 
 // ── POST /auth/token (CLI only) ───────────────────────────────────────────────
