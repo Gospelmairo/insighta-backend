@@ -103,6 +103,37 @@ Role checks are applied via `requireRole('admin')` middleware on write endpoints
 
 ---
 
+## CLI Usage
+
+Install and use via the [insighta-cli](https://github.com/Gospelmairo/insighta-cli) repo.
+
+```bash
+# Install globally
+npm install -g .
+
+# Login via GitHub OAuth (opens browser)
+insighta login
+
+# Show current user and role
+insighta whoami
+
+# List profiles (paginated)
+insighta profiles list
+insighta profiles list --limit 5 --page 2
+insighta profiles list --gender female --country NG
+
+# Natural language search
+insighta profiles search "young males from nigeria"
+insighta profiles search "females above 30 from kenya"
+
+# Logout
+insighta logout
+```
+
+Tokens are stored at `~/.insighta/credentials.json`. The CLI auto-refreshes the access token on expiry and prompts re-login if the refresh token is also expired.
+
+---
+
 ## Natural Language Parsing
 
 Rule-based parsing only — no AI or LLMs.
