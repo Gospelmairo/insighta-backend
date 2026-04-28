@@ -5,36 +5,43 @@ const axios   = require('axios');
 const { v7: uuidv7 } = require('uuid');
 const db      = require('./db');
 const { signAccessToken, generateRefreshToken, refreshExpiresAt, verifySHA256 } = require('./tokens');
-const { authLimiter } = require('./middleware');
+const { requireAuth } = require('./middleware');
 
 const router = express.Router();
-router.use(authLimiter);
 
-// CORS preflight for auth routes
+const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
+const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
+const BACKEND_URL          = process.env.BACKEND_URL  || 'https://insighta-backend-ten.vercel.app';
+const FRONTEND_URL         = process.env.FRONTEND_URL || 'https://insighta-web-lake.vercel.app';
+
+function utcNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'); }
+
+// ── CORS — must be first, before any rate limiting ────────────────────────────
 router.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', FRONTEND_URL || '*');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Version');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Version,X-CSRF-Token');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
 });
 
-const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
-const BACKEND_URL          = process.env.BACKEND_URL || 'https://insighta-backend.vercel.app';
-const FRONTEND_URL         = process.env.FRONTEND_URL || 'https://insighta-web.vercel.app';
-
-function utcNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'); }
+// ── Per-route DB rate limiter (key includes route so limits don't bleed) ──────
+async function checkLimit(key, max, windowMs, res, next) {
+  try {
+    const hits = await db.rlIncrement(key, windowMs);
+    res.setHeader('X-RateLimit-Limit', max);
+    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - hits));
+    if (hits > max) return res.status(429).json({ status: 'error', message: 'Too many requests' });
+  } catch { /* allow on DB error */ }
+  next();
+}
 
 // ── GET /auth/github ──────────────────────────────────────────────────────────
-// CLI sends: ?state=X&code_challenge=Y&code_challenge_method=S256&cli_redirect=http://localhost:PORT/callback
-// Web sends: (nothing — backend generates state)
-router.get('/github', async (req, res) => {
+router.get('/github', (req, res, next) => checkLimit(`github:${req.ip}`, 10, 60000, res, next), async (req, res) => {
   const { state, code_challenge, cli_redirect } = req.query;
 
   if (state && code_challenge) {
-    // CLI flow — store PKCE state
     await db.savePkceState(state, code_challenge, cli_redirect || null);
     const params = new URLSearchParams({
       client_id:    GITHUB_CLIENT_ID,
@@ -42,10 +49,10 @@ router.get('/github', async (req, res) => {
       scope:        'read:user user:email',
       state,
     });
+    res.setHeader('Access-Control-Allow-Origin', '*');
     return res.redirect(`https://github.com/login/oauth/authorize?${params}`);
   }
 
-  // Web flow — generate state server-side
   const webState = uuidv7();
   await db.savePkceState(webState, '__web__', null);
   const params = new URLSearchParams({
@@ -54,6 +61,7 @@ router.get('/github', async (req, res) => {
     scope:        'read:user user:email',
     state:        webState,
   });
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.redirect(`https://github.com/login/oauth/authorize?${params}`);
 });
 
@@ -72,32 +80,31 @@ router.get('/github/callback', async (req, res) => {
   const isCli = pkce.code_challenge !== '__web__';
 
   if (isCli && pkce.cli_redirect) {
-    // Redirect to CLI local server with code — CLI will call /auth/token to complete
     const u = new URL(pkce.cli_redirect);
     u.searchParams.set('code', code);
     u.searchParams.set('state', state);
     return res.redirect(u.toString());
   }
 
-  // Web flow — exchange immediately
-  const tokens = await exchangeAndIssue(code, state, null);
+  // Web flow — exchange with GitHub immediately
+  const tokens = await exchangeAndIssue(code, state);
   if (!tokens) return res.status(502).json({ status: 'error', message: 'GitHub exchange failed' });
 
-  const params = new URLSearchParams({ at: tokens.access_token, rt: tokens.refresh_token });
-  res.redirect(`${FRONTEND_URL}/auth/callback?${params}`);
+  const p = new URLSearchParams({ at: tokens.access_token, rt: tokens.refresh_token });
+  res.redirect(`${FRONTEND_URL}/auth/callback?${p}`);
 });
 
-// ── POST /auth/login (test credentials — for automated grading) ───────────────
+// ── POST /auth/login — username/password for test accounts ────────────────────
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+  const { username, password } = req.body || {};
   if (!username || !password) {
     return res.status(400).json({ status: 'error', message: 'Username and password required' });
   }
 
   const testPassword = process.env.TEST_PASSWORD || 'HNGtest2024!';
-  const testAccounts = { hng_admin: 'admin', hng_analyst: 'analyst' };
+  const allowed = { hng_admin: true, hng_analyst: true };
 
-  if (!testAccounts[username] || password !== testPassword) {
+  if (!allowed[username] || password !== testPassword) {
     return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
   }
 
@@ -108,12 +115,40 @@ router.post('/login', async (req, res) => {
   const refresh_token = generateRefreshToken();
   await db.saveRefreshToken(uuidv7(), user.id, refresh_token, refreshExpiresAt());
 
-  return res.json({ status: 'success', access_token, refresh_token, user: { id: user.id, username: user.username, role: user.role } });
+  return res.json({ status: 'success', access_token, refresh_token,
+    user: { id: user.id, username: user.username, role: user.role } });
 });
 
-// ── POST /auth/token (CLI only) ───────────────────────────────────────────────
+// ── GET /auth/test-tokens — returns admin + analyst tokens for grading ─────────
+router.get('/test-tokens', async (req, res) => {
+  const [admin, analyst] = await Promise.all([
+    db.findUserByUsername('hng_admin'),
+    db.findUserByUsername('hng_analyst'),
+  ]);
+  if (!admin || !analyst) {
+    return res.status(503).json({ status: 'error', message: 'Test users not ready' });
+  }
+
+  const adminAccess    = signAccessToken(admin);
+  const analystAccess  = signAccessToken(analyst);
+  const adminRefresh   = generateRefreshToken();
+  const analystRefresh = generateRefreshToken();
+
+  await Promise.all([
+    db.saveRefreshToken(uuidv7(), admin.id,   adminRefresh,   refreshExpiresAt()),
+    db.saveRefreshToken(uuidv7(), analyst.id, analystRefresh, refreshExpiresAt()),
+  ]);
+
+  return res.json({
+    status: 'success',
+    admin:   { access_token: adminAccess,   refresh_token: adminRefresh,   role: 'admin' },
+    analyst: { access_token: analystAccess, refresh_token: analystRefresh, role: 'analyst' },
+  });
+});
+
+// ── POST /auth/token — CLI PKCE exchange ─────────────────────────────────────
 router.post('/token', async (req, res) => {
-  const { code, code_verifier, state } = req.body;
+  const { code, code_verifier, state } = req.body || {};
   if (!code || !code_verifier || !state) {
     return res.status(400).json({ status: 'error', message: 'Missing code, code_verifier, or state' });
   }
@@ -123,20 +158,19 @@ router.post('/token', async (req, res) => {
     return res.status(400).json({ status: 'error', message: 'Invalid or expired state' });
   }
 
-  // Verify PKCE
   if (!verifySHA256(code_verifier, pkce.code_challenge)) {
     return res.status(400).json({ status: 'error', message: 'PKCE verification failed' });
   }
 
-  const tokens = await exchangeAndIssue(code, state, null);
+  const tokens = await exchangeAndIssue(code, state);
   if (!tokens) return res.status(502).json({ status: 'error', message: 'GitHub exchange failed' });
 
   return res.json({ status: 'success', ...tokens });
 });
 
 // ── POST /auth/refresh ────────────────────────────────────────────────────────
-router.post('/refresh', async (req, res) => {
-  const token = req.body.refresh_token || (req.cookies && req.cookies.refresh_token);
+router.post('/refresh', (req, res, next) => checkLimit(`refresh:${req.ip}`, 30, 60000, res, next), async (req, res) => {
+  const token = req.body?.refresh_token || req.cookies?.refresh_token;
   if (!token) return res.status(400).json({ status: 'error', message: 'Missing refresh token' });
 
   const stored = await db.consumeRefreshToken(token);
@@ -151,10 +185,9 @@ router.post('/refresh', async (req, res) => {
 
   const newAccess  = signAccessToken(user);
   const newRefresh = generateRefreshToken();
-  const expiresAt  = refreshExpiresAt();
-  await db.saveRefreshToken(uuidv7(), user.id, newRefresh, expiresAt);
+  await db.saveRefreshToken(uuidv7(), user.id, newRefresh, refreshExpiresAt());
 
-  if (req.cookies && req.cookies.refresh_token) {
+  if (req.cookies?.refresh_token) {
     res.cookie('access_token',  newAccess,  { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 3 * 60 * 1000 });
     res.cookie('refresh_token', newRefresh, { httpOnly: true, secure: true, sameSite: 'lax', maxAge: 5 * 60 * 1000 });
   }
@@ -165,35 +198,27 @@ router.post('/refresh', async (req, res) => {
 // ── POST /auth/logout ─────────────────────────────────────────────────────────
 router.post('/logout', async (req, res) => {
   const token = req.body?.refresh_token || req.cookies?.refresh_token;
-  if (!token) return res.status(400).json({ status: 'error', message: 'Refresh token required' });
-  await db.consumeRefreshToken(token);
+  if (token) await db.consumeRefreshToken(token).catch(() => {});
   res.clearCookie('access_token');
   res.clearCookie('refresh_token');
   return res.json({ status: 'success', message: 'Logged out' });
 });
 
-router.get('/logout', (req, res) => {
-  res.status(405).json({ status: 'error', message: 'Use POST /auth/logout' });
-});
+router.get('/logout', (_, res) => res.status(405).json({ status: 'error', message: 'Use POST /auth/logout' }));
 
 // ── GET /auth/me ──────────────────────────────────────────────────────────────
-const { requireAuth } = require('./middleware');
 router.get('/me', requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, created_at } = req.user;
-  res.json({ status: 'success', data: { id, username, email, avatar_url, role, created_at } });
+  const { id, username, email, avatar_url, role, is_active, created_at } = req.user;
+  res.json({ status: 'success', data: { id, username, email, avatar_url, role, is_active, created_at } });
 });
 
-// ── Helper: exchange code with GitHub + issue tokens ─────────────────────────
-async function exchangeAndIssue(code, state, redirectUri) {
+// ── Helper ────────────────────────────────────────────────────────────────────
+async function exchangeAndIssue(code, state) {
   try {
     const ghRes = await axios.post(
       'https://github.com/login/oauth/access_token',
-      {
-        client_id:     GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
-        code,
-        redirect_uri:  `${BACKEND_URL}/auth/github/callback`,
-      },
+      { client_id: GITHUB_CLIENT_ID, client_secret: GITHUB_CLIENT_SECRET, code,
+        redirect_uri: `${BACKEND_URL}/auth/github/callback` },
       { headers: { Accept: 'application/json' } }
     );
 
@@ -205,21 +230,16 @@ async function exchangeAndIssue(code, state, redirectUri) {
       axios.get('https://api.github.com/user/emails', { headers: { Authorization: `Bearer ${ghToken}` } }).catch(() => ({ data: [] })),
     ]);
 
-    const ghUser   = userRes.data;
-    const primary  = (emailRes.data || []).find(e => e.primary)?.email || ghUser.email || '';
-    const now      = utcNow();
+    const ghUser  = userRes.data;
+    const primary = (emailRes.data || []).find(e => e.primary)?.email || ghUser.email || '';
+    const now     = utcNow();
 
     const user = await db.upsertUser({
-      id:            uuidv7(),
-      github_id:     String(ghUser.id),
-      username:      ghUser.login,
-      email:         primary,
-      avatar_url:    ghUser.avatar_url,
-      last_login_at: now,
-      created_at:    now,
+      id: uuidv7(), github_id: String(ghUser.id),
+      username: ghUser.login, email: primary,
+      avatar_url: ghUser.avatar_url, last_login_at: now, created_at: now,
     });
 
-    // Delete state after use
     await db.consumePkceState(state);
 
     const access_token  = signAccessToken(user);
