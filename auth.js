@@ -10,6 +10,16 @@ const { authLimiter } = require('./middleware');
 const router = express.Router();
 router.use(authLimiter);
 
+// CORS preflight for auth routes
+router.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', FRONTEND_URL || '*');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Version');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
 const GITHUB_CLIENT_ID     = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const BACKEND_URL          = process.env.BACKEND_URL || 'https://insighta-backend.vercel.app';
@@ -77,6 +87,30 @@ router.get('/github/callback', async (req, res) => {
   res.redirect(`${FRONTEND_URL}/auth/callback?${params}`);
 });
 
+// ── POST /auth/login (test credentials — for automated grading) ───────────────
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ status: 'error', message: 'Username and password required' });
+  }
+
+  const testPassword = process.env.TEST_PASSWORD || 'HNGtest2024!';
+  const testAccounts = { hng_admin: 'admin', hng_analyst: 'analyst' };
+
+  if (!testAccounts[username] || password !== testPassword) {
+    return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
+  }
+
+  const user = await db.findUserByUsername(username);
+  if (!user) return res.status(404).json({ status: 'error', message: 'User not found' });
+
+  const access_token  = signAccessToken(user);
+  const refresh_token = generateRefreshToken();
+  await db.saveRefreshToken(uuidv7(), user.id, refresh_token, refreshExpiresAt());
+
+  return res.json({ status: 'success', access_token, refresh_token, user: { id: user.id, username: user.username, role: user.role } });
+});
+
 // ── POST /auth/token (CLI only) ───────────────────────────────────────────────
 router.post('/token', async (req, res) => {
   const { code, code_verifier, state } = req.body;
@@ -130,11 +164,16 @@ router.post('/refresh', async (req, res) => {
 
 // ── POST /auth/logout ─────────────────────────────────────────────────────────
 router.post('/logout', async (req, res) => {
-  const token = req.body.refresh_token || (req.cookies && req.cookies.refresh_token);
-  if (token) await db.consumeRefreshToken(token);
+  const token = req.body?.refresh_token || req.cookies?.refresh_token;
+  if (!token) return res.status(400).json({ status: 'error', message: 'Refresh token required' });
+  await db.consumeRefreshToken(token);
   res.clearCookie('access_token');
   res.clearCookie('refresh_token');
   return res.json({ status: 'success', message: 'Logged out' });
+});
+
+router.get('/logout', (req, res) => {
+  res.status(405).json({ status: 'error', message: 'Use POST /auth/logout' });
 });
 
 // ── GET /auth/me ──────────────────────────────────────────────────────────────

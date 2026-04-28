@@ -11,6 +11,13 @@ const { requireAuth, requireRole, requireApiVersion, apiLimiter } = require('./m
 const router = express.Router();
 router.use(apiLimiter);
 router.use(requireAuth);
+
+// /api/users/me — no version header required
+router.get('/users/me', (req, res) => {
+  const { id, username, email, avatar_url, role, is_active, created_at } = req.user;
+  res.json({ status: 'success', data: { id, username, email, avatar_url, role, is_active, created_at } });
+});
+
 router.use(requireApiVersion);
 
 function utcNow() { return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'); }
