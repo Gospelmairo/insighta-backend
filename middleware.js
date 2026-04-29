@@ -1,28 +1,26 @@
 'use strict';
 
-const { verifyAccessToken }      = require('./tokens');
-const { findUserById, rlIncrement } = require('./db');
+const rateLimit = require('express-rate-limit');
+const { verifyAccessToken } = require('./tokens');
+const { findUserById }      = require('./db');
 
-// ── DB-backed rate limiting (works across Vercel serverless instances) ────────
-function makeDbLimiter(max, windowMs, keyFn) {
-  return async (req, res, next) => {
-    const key = keyFn ? keyFn(req) : req.ip;
-    try {
-      const hits = await rlIncrement(key, windowMs);
-      res.setHeader('X-RateLimit-Limit', max);
-      res.setHeader('X-RateLimit-Remaining', Math.max(0, max - hits));
-      if (hits > max) {
-        return res.status(429).json({ status: 'error', message: 'Too many requests' });
-      }
-    } catch {
-      // If DB check fails, allow request through
-    }
-    next();
-  };
-}
+// ── In-memory rate limiting (resets per deployment/cold-start) ────────────────
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({ status: 'error', message: 'Too many requests' }),
+});
 
-const authLimiter = makeDbLimiter(10, 60 * 1000, (req) => `auth:${req.ip}`);
-const apiLimiter  = makeDbLimiter(60, 60 * 1000, (req) => `api:${req.ip}`);
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  keyGenerator: (req) => req.user?.id || req.ip,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => res.status(429).json({ status: 'error', message: 'Too many requests' }),
+});
 
 // ── Request logger ────────────────────────────────────────────────────────────
 function requestLogger(req, res, next) {

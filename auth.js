@@ -5,7 +5,7 @@ const axios   = require('axios');
 const { v7: uuidv7 } = require('uuid');
 const db      = require('./db');
 const { signAccessToken, generateRefreshToken, refreshExpiresAt, verifySHA256 } = require('./tokens');
-const { requireAuth } = require('./middleware');
+const { requireAuth, authLimiter } = require('./middleware');
 
 const router = express.Router();
 
@@ -26,19 +26,8 @@ router.use((req, res, next) => {
   next();
 });
 
-// ── Per-route DB rate limiter (key includes route so limits don't bleed) ──────
-async function checkLimit(key, max, windowMs, res, next) {
-  try {
-    const hits = await db.rlIncrement(key, windowMs);
-    res.setHeader('X-RateLimit-Limit', max);
-    res.setHeader('X-RateLimit-Remaining', Math.max(0, max - hits));
-    if (hits > max) return res.status(429).json({ status: 'error', message: 'Too many requests' });
-  } catch { /* allow on DB error */ }
-  next();
-}
-
 // ── GET /auth/github ──────────────────────────────────────────────────────────
-router.get('/github', (req, res, next) => checkLimit(`github:${req.ip}`, 10, 60000, res, next), async (req, res) => {
+router.get('/github', authLimiter, async (req, res) => {
   const { state, code_challenge, cli_redirect } = req.query;
 
   if (state && code_challenge) {
@@ -169,7 +158,7 @@ router.post('/token', async (req, res) => {
 });
 
 // ── POST /auth/refresh ────────────────────────────────────────────────────────
-router.post('/refresh', (req, res, next) => checkLimit(`refresh:${req.ip}`, 30, 60000, res, next), async (req, res) => {
+router.post('/refresh', async (req, res) => {
   const token = req.body?.refresh_token || req.cookies?.refresh_token;
   if (!token) return res.status(400).json({ status: 'error', message: 'Missing refresh token' });
 
