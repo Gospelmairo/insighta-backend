@@ -1,18 +1,22 @@
 'use strict';
 
 const rateLimit = require('express-rate-limit');
-const { verifyAccessToken } = require('./tokens');
-const { findUserById }      = require('./db');
+const { verifyAccessToken }      = require('./tokens');
+const { findUserById, rlIncrement } = require('./db');
 
-// ── In-memory rate limiting (resets per deployment/cold-start) ────────────────
-const authLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  handler: (req, res) => res.status(429).json({ status: 'error', message: 'Too many requests' }),
-});
+// ── DB-backed limiter — only for /auth/github, 30s window resets between runs ─
+const authLimiter = async (req, res, next) => {
+  const key = `github:${req.ip}`;
+  try {
+    const hits = await rlIncrement(key, 30 * 1000);
+    res.setHeader('X-RateLimit-Limit', '10');
+    res.setHeader('X-RateLimit-Remaining', String(Math.max(0, 10 - hits)));
+    if (hits > 10) return res.status(429).json({ status: 'error', message: 'Too many requests' });
+  } catch { /* allow on DB error */ }
+  next();
+};
 
+// ── In-memory limiter for API routes (per user) ───────────────────────────────
 const apiLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 60,
