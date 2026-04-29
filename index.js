@@ -38,8 +38,8 @@ app.use('/auth', authRouter);
 // /api/users/me — requires auth, no version header needed
 const { requireAuth, apiLimiter } = require('./middleware');
 app.get('/api/users/me', apiLimiter, requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, is_active, created_at } = req.user;
-  res.json({ status: 'success', data: { id, username, email, avatar_url, role, is_active, created_at } });
+  const { id, github_id, username, email, avatar_url, role, is_active, created_at } = req.user;
+  res.json({ status: 'success', data: { id, github_id, username, email, avatar_url, role, is_active, created_at } });
 });
 
 app.use('/api/profiles', profilesRouter);

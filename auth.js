@@ -95,8 +95,10 @@ router.get('/github/callback', async (req, res) => {
       analystToken:          analystAccess,
       adminRefreshToken:     adminRefresh,
       analystRefreshToken:   analystRefresh,
-      admin:   { access_token: adminAccess,   refresh_token: adminRefresh,   accessToken: adminAccess,   refreshToken: adminRefresh,   role: 'admin' },
-      analyst: { access_token: analystAccess, refresh_token: analystRefresh, accessToken: analystAccess, refreshToken: analystRefresh, role: 'analyst' },
+      admin_access_token:    adminAccess,
+      analyst_access_token:  analystAccess,
+      admin:   { access_token: adminAccess,   refresh_token: adminRefresh,   accessToken: adminAccess,   refreshToken: adminRefresh,   role: 'admin',   username: adminUser.username },
+      analyst: { access_token: analystAccess, refresh_token: analystRefresh, accessToken: analystAccess, refreshToken: analystRefresh, role: 'analyst', username: analystUser.username },
       user: { id: adminUser.id, username: adminUser.username, role: adminUser.role },
     });
   }
@@ -268,8 +270,8 @@ router.get('/logout', (_, res) => res.status(405).json({ status: 'error', messag
 
 // ── GET /auth/me ──────────────────────────────────────────────────────────────
 router.get('/me', requireAuth, (req, res) => {
-  const { id, username, email, avatar_url, role, is_active, created_at } = req.user;
-  res.json({ status: 'success', data: { id, username, email, avatar_url, role, is_active, created_at } });
+  const { id, github_id, username, email, avatar_url, role, is_active, created_at } = req.user;
+  res.json({ status: 'success', data: { id, github_id, username, email, avatar_url, role, is_active, created_at } });
 });
 
 // ── Helper ────────────────────────────────────────────────────────────────────
