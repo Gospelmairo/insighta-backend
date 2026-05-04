@@ -4,8 +4,11 @@ const express        = require('express');
 const axios          = require('axios');
 const { v7: uuidv7 } = require('uuid');
 const db             = require('./db');
-const { parseQuery } = require('./nlp');
-const { getNameByCode } = require('./countries');
+const { parseQuery }      = require('./nlp');
+const { getNameByCode }   = require('./countries');
+const cache               = require('./cache');
+const { normalizeFilters } = require('./normalize');
+const { handleUpload }    = require('./ingest');
 const { requireAuth, requireRole, requireApiVersion, apiLimiter } = require('./middleware');
 
 const router = express.Router();
@@ -51,6 +54,9 @@ function parsePagination(q) {
   return { page, limit };
 }
 
+// ── POST /api/profiles/upload (admin only) ────────────────────────────────────
+router.post('/upload', requireRole('admin'), handleUpload);
+
 // ── GET /api/profiles/export ──────────────────────────────────────────────────
 router.get('/export', async (req, res) => {
   const { format } = req.query;
@@ -81,10 +87,17 @@ router.get('/search', async (req, res) => {
   if (!filters) return res.status(400).json(err('Unable to interpret query'));
 
   const { page, limit } = parsePagination(req.query);
+  const cacheKey = normalizeFilters({ ...filters, page, limit });
+  if (cacheKey) {
+    const hit = cache.get(cacheKey);
+    if (hit) return res.json(hit);
+  }
   try {
     const { total, rows } = await db.findAllProfiles({ ...filters, page, limit });
     const meta = paginationMeta(page, limit, total, '/api/profiles/search', { q, page, limit });
-    return res.json({ status: 'success', ...meta, data: rows.map(fmt) });
+    const body = { status: 'success', ...meta, data: rows.map(fmt) };
+    if (cacheKey) cache.set(cacheKey, body);
+    return res.json(body);
   } catch (e) {
     return res.status(500).json(err('Internal server error'));
   }
@@ -114,10 +127,17 @@ router.get('/', async (req, res) => {
     sort_by: sort_by || 'created_at', order: order || 'asc', page, limit,
   };
 
+  const cacheKey = normalizeFilters(opts);
+  if (cacheKey) {
+    const hit = cache.get(cacheKey);
+    if (hit) return res.json(hit);
+  }
   try {
     const { total, rows } = await db.findAllProfiles(opts);
     const meta = paginationMeta(page, limit, total, '/api/profiles', { ...req.query, page, limit });
-    return res.json({ status: 'success', ...meta, data: rows.map(fmt) });
+    const body = { status: 'success', ...meta, data: rows.map(fmt) };
+    if (cacheKey) cache.set(cacheKey, body);
+    return res.json(body);
   } catch (e) {
     return res.status(500).json(err('Internal server error'));
   }

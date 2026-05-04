@@ -4,7 +4,7 @@ const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+  ssl: { rejectUnauthorized: false },
 });
 
 async function init() {
@@ -72,6 +72,8 @@ async function init() {
     'CREATE INDEX IF NOT EXISTS idx_created_at   ON profiles(created_at)',
     'CREATE INDEX IF NOT EXISTS idx_gender_prob  ON profiles(gender_probability)',
     'CREATE INDEX IF NOT EXISTS idx_country_prob ON profiles(country_probability)',
+    // Composite index for the most common combined filter pattern
+    'CREATE INDEX IF NOT EXISTS idx_country_gender_age ON profiles(country_id, gender, age)',
   ];
   for (const q of indexes) await pool.query(q);
 
@@ -141,6 +143,41 @@ async function insertProfile(p) {
 async function deleteProfileById(id) {
   const { rowCount } = await pool.query('DELETE FROM profiles WHERE id = $1', [id]);
   return rowCount > 0;
+}
+
+// Bulk insert using unnest — inserts an entire chunk in one round-trip.
+// Returns the number of rows actually inserted (conflicts are silently skipped).
+async function bulkInsertProfiles(profiles) {
+  if (!profiles.length) return 0;
+
+  const ids = [], names = [], genders = [], gprobs = [], ages = [],
+        groups = [], cids = [], cnames = [], cprobs = [], createdAts = [];
+
+  const now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  for (const p of profiles) {
+    ids.push(p.id);
+    names.push(p.name);
+    genders.push(p.gender);
+    gprobs.push(p.gender_probability);
+    ages.push(p.age);
+    groups.push(p.age_group);
+    cids.push(p.country_id);
+    cnames.push(p.country_name);
+    cprobs.push(p.country_probability);
+    createdAts.push(now);
+  }
+
+  const { rowCount } = await pool.query(
+    `INSERT INTO profiles
+       (id,name,gender,gender_probability,age,age_group,country_id,country_name,country_probability,created_at)
+     SELECT unnest($1::text[]), unnest($2::text[]), unnest($3::text[]), unnest($4::float[]),
+            unnest($5::int[]),  unnest($6::text[]), unnest($7::text[]), unnest($8::text[]),
+            unnest($9::float[]), unnest($10::text[])
+     ON CONFLICT (name) DO NOTHING`,
+    [ids, names, genders, gprobs, ages, groups, cids, cnames, cprobs, createdAts],
+  );
+  return rowCount;
 }
 
 // ── Users ─────────────────────────────────────────────────────────────────────
@@ -226,6 +263,7 @@ async function getPkceState(state) {
 module.exports = {
   pool, init,
   findAllProfiles, findProfileById, findProfileByName, insertProfile, deleteProfileById,
+  bulkInsertProfiles,
   upsertUser, findUserById, findUserByUsername,
   saveRefreshToken, consumeRefreshToken, deleteUserRefreshTokens,
   savePkceState, consumePkceState, getPkceState,
